@@ -129,14 +129,15 @@
 #     exit. Forged `#check` lines make the block count disagree with N -> fail.
 #   * The docstring scan prints one `DOCSCAN <decl> ...` line per violation, one
 #     `DOCSCAN-ALL <decl> <status>` line per scanned declaration, one
-#     `NOLINT <linter> <decl>` line per TauCeti `@[nolint]` application, and exactly
-#     one summary line ending in a per-run random nonce marker, carrying its own
-#     counts for ALL of these. We require exit 0, EXACTLY ONE summary line, every
-#     count to match its line tally, the calibration guards above (sentinels,
+#     `NOLINT <linter> <decl>` line per TauCeti `@[nolint]` application, and (in
+#     changed-module mode) one `LINTENV-DECL <decl>` line per selected declaration.
+#     Exactly one summary line ends in a per-run random nonce marker and carries its
+#     own counts for ALL of these. We require exit 0, EXACTLY ONE summary line, every
+#     count to match its line tally, the global calibration guards above (sentinels,
 #     baseline coverage, scanned floor, at least one visible docstring), and the
-#     nolint pairs to be allowlisted. Forged DOCSCAN/DOCSCAN-ALL/NOLINT lines break
-#     the tallies (they can only ADD lines — the real ones still print); a forged
-#     summary must predict the nonce.
+#     nolint pairs to be allowlisted. Forged DOCSCAN/DOCSCAN-ALL/NOLINT/LINTENV-DECL
+#     lines break the tallies (they can only ADD lines — the real ones still print);
+#     a forged summary must predict the nonce.
 #   * The remaining forgery needs a process to die before the real work runs while
 #     having already printed a single self-consistent PASSING report. Commands after
 #     a failed command still elaborate, so the `#lint` driver appends a `#eval`
@@ -153,17 +154,56 @@
 # needs the compiled oleans. It does no network I/O and writes only under $TMPDIR, so
 # it is safe inside the pr-build landrun sandbox. Usage:
 #
-#   scripts/lint-env.sh            # check against the baseline
-#   scripts/lint-env.sh --update   # rewrite the baseline from the current state
+#   scripts/lint-env.sh                              # repository-wide CI check
+#   scripts/lint-env.sh --changed-from <revision>    # changed-module authoring check
+#   scripts/lint-env.sh --update                     # rewrite the global baseline
+#
+# The changed-module form imports only existing added, copied, modified, renamed, or
+# untracked `TauCeti/**/*.lean` modules and reports only declarations defined in those
+# modules. CI deliberately uses the no-argument, repository-wide form.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 BASELINE="scripts/lint-baseline.txt"
 ALLOWLIST="scripts/lint-nolints-allowlist.txt"
+START_SECONDS=$SECONDS
 UPDATE=0
-[ "${1:-}" = "--update" ] && UPDATE=1
+SCOPED=0
+CHANGED_FROM=""
 
-fail() { echo "::error::lint-env: $*"; echo "LINT-ENV: FAIL — $*"; exit 1; }
+usage() {
+  echo "usage: scripts/lint-env.sh [--update | --changed-from <revision>]" >&2
+  exit 2
+}
+
+case "${1:-}" in
+  "") [ "$#" -eq 0 ] || usage ;;
+  --update) [ "$#" -eq 1 ] || usage; UPDATE=1 ;;
+  --changed-from)
+    [ "$#" -eq 2 ] || usage
+    SCOPED=1
+    CHANGED_FROM=$2
+    ;;
+  *) usage ;;
+esac
+
+elapsed_text() {
+  local elapsed=$((SECONDS - START_SECONDS))
+  if [ "$elapsed" -lt 60 ]; then
+    printf '%ss' "$elapsed"
+  else
+    printf '%sm %ss' "$((elapsed / 60))" "$((elapsed % 60))"
+  fi
+}
+
+fail() {
+  echo "::error::lint-env: $*"
+  echo "LINT-ENV: FAIL — $*"
+  if [ "$SCOPED" = 1 ]; then
+    echo "lint-env: elapsed: $(elapsed_text)"
+  fi
+  exit 1
+}
 
 TMP="$(mktemp -d)" || fail "mktemp failed"
 trap 'rm -rf "$TMP"' EXIT
@@ -201,9 +241,50 @@ LINTERS="checkType defsWithUnderscore deprecatedNoSince impossibleInstance nonCl
 LINTERS_LEAN=$(printf '"%s", ' $LINTERS | sed 's/, $//')
 
 MODULE_IMPORT_LIST="$TMP/modules.txt"
-find TauCeti -name '*.lean' | LC_ALL=C sort | sed 's/\.lean$//; s|/|.|g' > "$MODULE_IMPORT_LIST"
+if [ "$SCOPED" = 1 ]; then
+  git rev-parse --verify "${CHANGED_FROM}^{commit}" > "$TMP/base-commit.txt" \
+    || fail "could not resolve changed-module base $CHANGED_FROM"
+  BASE_COMMIT=$(cat "$TMP/base-commit.txt")
+  git diff --name-only --diff-filter=ACMR "$BASE_COMMIT" -- TauCeti > "$TMP/tracked-paths.txt" \
+    || fail "could not compare changed modules with $CHANGED_FROM"
+  git ls-files --others --exclude-standard -- TauCeti > "$TMP/untracked-paths.txt" \
+    || fail "could not enumerate untracked TauCeti modules"
+  LC_ALL=C sort -u "$TMP/tracked-paths.txt" "$TMP/untracked-paths.txt" |
+    while IFS= read -r path; do
+      case "$path" in
+        TauCeti/*.lean)
+          if [ -f "$path" ]; then
+            printf '%s\n' "$path"
+          fi
+          ;;
+      esac
+    done |
+    sed 's/\.lean$//; s|/|.|g' > "$MODULE_IMPORT_LIST"
+else
+  find TauCeti -name '*.lean' | LC_ALL=C sort | sed 's/\.lean$//; s|/|.|g' > "$MODULE_IMPORT_LIST"
+fi
 mods=$(wc -l < "$MODULE_IMPORT_LIST")
+if [ "${mods:-0}" -eq 0 ] && [ "$SCOPED" = 1 ]; then
+  echo "LINT-ENV: PASS — no changed TauCeti modules relative to $CHANGED_FROM \
+(elapsed: $(elapsed_text))."
+  exit 0
+fi
 [ "${mods:-0}" -gt 0 ] || fail "found no TauCeti/*.lean modules — the lint is miswired"
+
+SCOPE_LEAN="$TMP/scope.lean"
+if [ "$SCOPED" = 1 ]; then
+  {
+    echo "  let scoped := true"
+    echo "  let selectedModules : Option (Array Name) := some #["
+    sed 's/^/    `/; s/$/,/' "$MODULE_IMPORT_LIST"
+    echo "  ]"
+  } > "$SCOPE_LEAN"
+else
+  {
+    echo "  let scoped := false"
+    echo "  let selectedModules : Option (Array Name) := none"
+  } > "$SCOPE_LEAN"
+fi
 
 # --- 1. docstring scan (fast; see the docBlame exclusion rationale above) ----------
 # A LEGACY (non-module) driver with plain imports: the non-module root imports the
@@ -235,6 +316,13 @@ def docscanKind? (declName : Name) : MetaM (Option String) := do
 open Lean in
 run_meta do
   let env ← getEnv
+EOF
+  cat "$SCOPE_LEAN"
+  cat <<EOF
+  let selectedModule := fun m =>
+    match selectedModules with
+    | none => m == \`TauCeti || (\`TauCeti).isPrefixOf m
+    | some modules => modules.contains m
   -- Freshness guard (see the header comment): the explicit \`#lint only\` list in
   -- scripts/lint-env.sh must still equal the default linter set minus docBlame.
   let expected : Array String := #[$LINTERS_LEAN]
@@ -251,9 +339,12 @@ run_meta do
     match env.getModuleIdxFor? declName with
     | some idx =>
       match modNames[idx.toNat]? with
-      | some m => if m == \`TauCeti || (\`TauCeti).isPrefixOf m then acc.push declName else acc
+      | some m => if selectedModule m then acc.push declName else acc
       | none => acc
     | none => acc
+  if scoped then
+    for declName in candidates do
+      IO.println s!"LINTENV-DECL {declName}"
   let mut scanned := 0
   let mut documented := 0
   let mut undoc := 0
@@ -283,17 +374,22 @@ run_meta do
     let entries := Batteries.Tactic.Lint.nolintAttr.ext.getModuleEntries env midx
     importedNolintEntries := importedNolintEntries + entries.size
     if let some m := modNames[idx]? then
-      if m == \`TauCeti || (\`TauCeti).isPrefixOf m then
+      if selectedModule m then
         for (decl, linterNames) in entries do
           for l in linterNames do
             IO.println s!"NOLINT {l} {decl}"
             nolints := nolints + 1
-  if importedNolintEntries == 0 then
+  if !scoped && importedNolintEntries == 0 then
     throwError "the @[nolint] enumeration is blind: no persistent nolint entries are \
       visible in ANY imported module, yet Batteries/Mathlib are known to carry some — \
       the attribute-extension API moved; fix the enumeration in scripts/lint-env.sh, \
       do not allowlist around this"
-  IO.println s!"DOCSCAN-SUMMARY scanned={scanned} documented={documented} undocumented={undoc} nolints={nolints} $DOCMARKER"
+  if scoped then
+    IO.println s!"DOCSCAN-SUMMARY scanned={scanned} documented={documented} \
+      undocumented={undoc} nolints={nolints} decls={candidates.size} $DOCMARKER"
+  else
+    IO.println s!"DOCSCAN-SUMMARY scanned={scanned} documented={documented} \
+      undocumented={undoc} nolints={nolints} $DOCMARKER"
 EOF
 } > "$DOCDRIVER"
 
@@ -301,7 +397,12 @@ if ! lake env lean "$DOCDRIVER" > "$TMP/docscan.txt" 2>&1; then
   cat "$TMP/docscan.txt"
   fail "driver failure: the docstring-scan driver did not elaborate cleanly — see output above"
 fi
-nsummaries=$(grep -c "^DOCSCAN-SUMMARY scanned=[0-9]* documented=[0-9]* undocumented=[0-9]* nolints=[0-9]* $DOCMARKER\$" "$TMP/docscan.txt" || true)
+if [ "$SCOPED" = 1 ]; then
+  summary_pattern="^DOCSCAN-SUMMARY scanned=[0-9]* documented=[0-9]* undocumented=[0-9]* nolints=[0-9]* decls=[0-9]* $DOCMARKER\$"
+else
+  summary_pattern="^DOCSCAN-SUMMARY scanned=[0-9]* documented=[0-9]* undocumented=[0-9]* nolints=[0-9]* $DOCMARKER\$"
+fi
+nsummaries=$(grep -c "$summary_pattern" "$TMP/docscan.txt" || true)
 if [ "${nsummaries:-0}" -ne 1 ]; then
   cat "$TMP/docscan.txt"
   fail "driver failure: expected exactly 1 docstring-scan summary line, found ${nsummaries:-0}"
@@ -312,6 +413,16 @@ scanned=$(echo "$summary" | sed -n 's/.* scanned=\([0-9]*\).*/\1/p')
 documented=$(echo "$summary" | sed -n 's/.* documented=\([0-9]*\).*/\1/p')
 undocumented=$(echo "$summary" | sed -n 's/.* undocumented=\([0-9]*\).*/\1/p')
 nolints=$(echo "$summary" | sed -n 's/.* nolints=\([0-9]*\).*/\1/p')
+if [ "$SCOPED" = 1 ]; then
+  decls=$(echo "$summary" | sed -n 's/.* decls=\([0-9]*\).*/\1/p')
+  ndecllines=$(grep -c '^LINTENV-DECL ' "$TMP/docscan.txt" || true)
+  [ "${ndecllines:-0}" -eq "$decls" ] \
+    || { cat "$TMP/docscan.txt"; fail "driver failure: docstring-scan summary claims $decls selected declaration(s) but ${ndecllines:-0} LINTENV-DECL line(s) parsed"; }
+  LC_ALL=C sed -n 's/^LINTENV-DECL //p' "$TMP/docscan.txt" | LC_ALL=C sort -u > "$TMP/selected-decls.txt"
+  nselected=$(wc -l < "$TMP/selected-decls.txt")
+  [ "${nselected:-0}" -eq "$decls" ] \
+    || { cat "$TMP/docscan.txt"; fail "driver failure: selected declaration list contains duplicates"; }
+fi
 ndocviol=$(grep -c '^DOCSCAN ' "$TMP/docscan.txt" || true)
 [ "${ndocviol:-0}" -eq "$undocumented" ] \
   || { cat "$TMP/docscan.txt"; fail "driver failure: docstring-scan summary claims $undocumented violation(s) but ${ndocviol:-0} DOCSCAN line(s) parsed"; }
@@ -328,6 +439,7 @@ nall_undoc=$(awk '$1 == "DOCSCAN-ALL" && $3 == "undocumented"' "$TMP/docscan.txt
   || { cat "$TMP/docscan.txt"; fail "driver failure: DOCSCAN-ALL status tallies ($nall_doc documented, $nall_undoc undocumented) disagree with the summary ($documented, $undocumented)"; }
 [ "$scanned" -eq $((documented + undocumented)) ] \
   || fail "docstring scan summary is inconsistent: scanned=$scanned != documented=$documented + undocumented=$undocumented"
+global_docscan_calibration() {
 [ "$scanned" -gt 0 ] || fail "docstring scan scanned 0 declarations — the scan is miswired"
 [ "$documented" -gt 0 ] \
   || fail "docstring scan saw NO docstrings at all ($scanned scanned): docstring visibility is broken (olean docstring storage moved?) — fix the scan, do not baseline this"
@@ -357,6 +469,8 @@ if [ "$UPDATE" != 1 ]; then
       || fail "docstring-scan coverage loss: baseline entry 'docString $d' is no longer scanned at all (not merely fixed) — fix the scan, do not ratchet this entry away"
   done
 fi
+}
+[ "$SCOPED" = 1 ] || global_docscan_calibration
 LC_ALL=C sed -n 's/^DOCSCAN \([^ ]*\).*/docString \1/p' "$TMP/docscan.txt" > "$TMP/violations-docscan.txt"
 echo "lint-env: docstring scan: $scanned scanned, $documented documented, $undocumented undocumented."
 
@@ -375,14 +489,17 @@ if [ -s "$TMP/nolints-new.txt" ]; then
   echo "PRs (never via an auto-merged one)."
   fail "unaccounted '@[nolint]' application(s); see the list above"
 fi
+global_nolint_ratchet() {
 LC_ALL=C comm -13 "$TMP/nolints.txt" "$ALLOWLIST" > "$TMP/nolints-fixed.txt"
 if [ -s "$TMP/nolints-fixed.txt" ]; then
   echo "lint-env: RATCHET — allowlist entr(y/ies) in $ALLOWLIST no longer correspond to a"
   echo "@[nolint] application; please delete these lines (a follow-up PR is fine):"
   sed 's/^/  /' "$TMP/nolints-fixed.txt"
 fi
+}
+[ "$SCOPED" = 1 ] || global_nolint_ratchet
 
-# --- 2. generate the #lint driver: import every TauCeti module, default linters ---
+# --- 2. generate the #lint driver: import requested TauCeti modules, default linters
 # `set_option linter.hashCommand false` because the driver is generated, not committed;
 # the style linter would otherwise flag the bare `#lint`/`#eval`. The trailing `#eval`
 # prints a per-run nonce proving the process survived past `#lint` (see SECURITY MODEL).
@@ -528,10 +645,23 @@ if [ "${nchecks:-0}" -ne "$hdr_count" ]; then
   fail "driver/linter failure: header claims $hdr_count violation(s) but $nchecks #check block(s) parsed"
 fi
 
+# `#lint in TauCeti` also visits declarations from dependencies imported by a
+# changed module. Keep the full report for fail-closed parsing above, then narrow
+# authoring-mode findings to declarations the docscan attributed to selected modules.
+if [ "$SCOPED" = 1 ]; then
+  LC_ALL=C awk 'NR == FNR { selected[$0] = 1; next } ($2 in selected)' \
+    "$TMP/selected-decls.txt" "$TMP/violations-lint.txt" > "$TMP/violations-lint-scoped.txt"
+  mv "$TMP/violations-lint-scoped.txt" "$TMP/violations-lint.txt"
+fi
+
 # --- 5. combine, then --update or compare against the grandfathered baseline ------
 LC_ALL=C sort -u "$TMP/violations-lint.txt" "$TMP/violations-docscan.txt" > "$TMP/violations.txt"
 total=$(wc -l < "$TMP/violations.txt")
-echo "lint-env: linted $mods modules; $total (linter, declaration) violation(s)."
+if [ "$SCOPED" = 1 ]; then
+  echo "lint-env: linted $mods changed module(s); $total (linter, declaration) violation(s)."
+else
+  echo "lint-env: linted $mods modules; $total (linter, declaration) violation(s)."
+fi
 
 if [ "$UPDATE" = 1 ]; then
   cp "$TMP/violations.txt" "$BASELINE"
@@ -539,6 +669,7 @@ if [ "$UPDATE" = 1 ]; then
   exit 0
 fi
 
+global_baseline_ratchet() {
 # Baseline entries that no longer violate: a ratchet reminder, never a failure.
 LC_ALL=C comm -13 "$TMP/violations.txt" "$BASELINE" > "$TMP/fixed.txt"
 if [ -s "$TMP/fixed.txt" ]; then
@@ -546,6 +677,12 @@ if [ -s "$TMP/fixed.txt" ]; then
   echo "lint-env: RATCHET — $(wc -l < "$TMP/fixed.txt") baseline entr(y/ies) no longer violate."
   echo "Please delete these lines from $BASELINE (a follow-up PR is fine):"
   sed 's/^/  /' "$TMP/fixed.txt"
+fi
+}
+if [ "$SCOPED" = 1 ]; then
+  printf '' > "$TMP/fixed.txt"
+else
+  global_baseline_ratchet
 fi
 
 # Violations not in the baseline: new debt — fail, and show each check's reasoning.
@@ -585,4 +722,9 @@ if [ -s "$TMP/new.txt" ]; then
   fail "$(wc -l < "$TMP/new.txt") new violation(s); see the list above"
 fi
 
-echo "LINT-ENV: PASS — no new violations ($total grandfathered, $(wc -l < "$TMP/fixed.txt") ratchetable)."
+if [ "$SCOPED" = 1 ]; then
+  echo "LINT-ENV: PASS — no new violations in changed modules \
+($total grandfathered; elapsed: $(elapsed_text))."
+else
+  echo "LINT-ENV: PASS — no new violations ($total grandfathered, $(wc -l < "$TMP/fixed.txt") ratchetable)."
+fi

@@ -13,7 +13,10 @@ declaration uses only the standard allowlist
 Because it works on the kernel environment rather than on source text, it catches what a
 `grep` cannot: `sorry`/`admit` (which surface as `sorryAx`), `native_decide` (which adds
 `Lean.ofReduceBool`), and any home-rolled `axiom`, including ones reaching in through
-imports. Run via `lake exe axioms` (after `lake build`).
+imports. Run via `lake exe axioms` (after `lake build`). For a local authoring
+check, `lake exe axioms --changed-from <revision>` audits only declarations defined
+in added, copied, modified, renamed, or untracked `TauCeti` modules; CI deliberately
+uses the no-argument, repository-wide form.
 -/
 
 open Lean
@@ -60,6 +63,38 @@ Enumerating the source tree (rather than only importing the root) means every mo
 audited regardless of the root, which is intentionally empty and imports nothing. -/
 def auditedModules : IO (Array Name) :=
   return #[auditedRoot] ++ (← collectLeanModules (auditedRoot.toString : System.FilePath))
+
+/-- Run `git` and return its standard output, or fail with its diagnostic. -/
+def gitOutput (args : Array String) : IO String := do
+  let out ← IO.Process.output { cmd := "git", args := args }
+  if out.exitCode == 0 then
+    return out.stdout
+  let diagnostic := out.stderr.trimAscii.copy
+  throw <| IO.userError <| if diagnostic.isEmpty then
+    s!"git exited with status {out.exitCode}"
+  else
+    diagnostic
+
+/-- Existing added, copied, modified, or renamed `TauCeti/**/*.lean` modules relative
+to `base`, plus untracked modules. Deleted modules have no compiled declarations to
+audit. NUL-delimited Git output makes unusual-but-valid path characters unambiguous. -/
+def changedModules (base : String) : IO (Array Name) := do
+  let baseCommit := (← gitOutput #[
+    "rev-parse", "--verify", base ++ "^{commit}"
+  ]).trimAscii.copy
+  let tracked ← gitOutput #[
+    "diff", "--name-only", "-z", "--diff-filter=ACMR", baseCommit, "--", "TauCeti"
+  ]
+  let untracked ← gitOutput #[
+    "ls-files", "--others", "--exclude-standard", "-z", "--", "TauCeti"
+  ]
+  let mut modules : Array Name := #[]
+  for rawPath in (tracked ++ untracked).splitOn "\u0000" do
+    if !rawPath.isEmpty then
+      let path : System.FilePath := rawPath
+      if path.extension == some "lean" && (← path.pathExists) then
+        modules := modules.push (pathToModule path)
+  return modules.qsort fun a b => a.toString < b.toString
 
 /-- Reader/State monad for the shared axiom-reachability pass: the `Environment` is read-only
 and the `NameMap Bool` memoizes, for every constant visited, whether it transitively depends on
@@ -109,15 +144,20 @@ violation messages, **already rendered to `String`**.
 The strings must be materialized here, inside the environment callback: declaration and
 axiom `Name`s loaded from `.olean`s live in a memory-mapped region that is unmapped once
 `withImportModules` returns, so formatting them afterwards is a use-after-free. -/
-def audit : CoreM (Nat × Array String) := do
+def audit (selectedModules : Option (Array Name) := none) : CoreM (Nat × Array String) := do
   let env ← getEnv
   let modNames := env.allImportedModuleNames
-  -- Candidate declarations: those defined in a `TauCeti` module.
+  -- Candidate declarations: every `TauCeti` declaration for CI, or exactly those
+  -- defined in the changed modules for a local authoring check.
   let candidates : Array Name := env.constants.fold (init := #[]) fun acc declName _ =>
     match env.getModuleIdxFor? declName with
     | some idx =>
       match modNames[idx.toNat]? with
-      | some m => if inAuditedLib m then acc.push declName else acc
+      | some m =>
+          let selected := match selectedModules with
+            | none => inAuditedLib m
+            | some modules => modules.contains m
+          if selected then acc.push declName else acc
       | none => acc
     | none => acc
   -- One shared-cache pass over all candidates: near-linear in the reachable closure, vs the old
@@ -133,21 +173,56 @@ def audit : CoreM (Nat × Array String) := do
     messages := messages.push s!"  {declName} → {bad.toList}"
   return (candidates.size, messages)
 
+def elapsedText (started : Nat) : IO String := do
+  let seconds := ((← IO.monoMsNow) - started) / 1000
+  if seconds < 60 then
+    return s!"{seconds}s"
+  return s!"{seconds / 60}m {seconds % 60}s"
+
 -- Return the exit code (rather than `IO.Process.exit`) so the Lean runtime tears the
 -- imported environment down in order; an abrupt `exit()` can segfault during teardown.
-def main : IO UInt32 := do
-  let modules ← auditedModules
-  let (audited, messages) ← withImportedEnv modules audit
-  if audited == 0 then
-    -- Governance tooling must fail loudly if it audited nothing (e.g. miswired import).
-    IO.eprintln s!"axioms: audited 0 declarations in {auditedRoot}: the audit is miswired."
-    return 1
-  if messages.isEmpty then
-    IO.println s!"axioms: audited {audited} {auditedRoot} declaration(s); \
-      all within the allowlist {allowedAxioms}."
-    return 0
-  else
-    IO.eprintln s!"axioms: {messages.size} declaration(s) in {auditedRoot} use disallowed axioms:"
-    for m in messages do IO.eprintln m
-    IO.eprintln s!"allowed: {allowedAxioms}"
-    return 1
+def main (args : List String) : IO UInt32 := do
+  match args with
+  | [] =>
+      let modules ← auditedModules
+      let (audited, messages) ← withImportedEnv modules audit
+      if audited == 0 then
+        -- Governance tooling must fail loudly if it audited nothing (e.g. miswired import).
+        IO.eprintln s!"axioms: audited 0 declarations in {auditedRoot}: the audit is miswired."
+        return 1
+      if messages.isEmpty then
+        IO.println s!"axioms: audited {audited} {auditedRoot} declaration(s); \
+          all within the allowlist {allowedAxioms}."
+        return 0
+      else
+        IO.eprintln s!"axioms: {messages.size} declaration(s) in {auditedRoot} use disallowed axioms:"
+        for m in messages do IO.eprintln m
+        IO.eprintln s!"allowed: {allowedAxioms}"
+        return 1
+  | ["--changed-from", base] =>
+      let started ← IO.monoMsNow
+      try
+        let modules ← changedModules base
+        if modules.isEmpty then
+          IO.println s!"axioms: no changed {auditedRoot} modules relative to {base} \
+            (elapsed: {← elapsedText started})."
+          return 0
+        let (audited, messages) ← withImportedEnv modules (audit (some modules))
+        if messages.isEmpty then
+          IO.println s!"axioms: audited {audited} declaration(s) in {modules.size} changed \
+            {auditedRoot} module(s); all within the allowlist {allowedAxioms} \
+            (elapsed: {← elapsedText started})."
+          return 0
+        IO.eprintln s!"axioms: {messages.size} declaration(s) in changed {auditedRoot} \
+          modules use disallowed axioms:"
+        for m in messages do IO.eprintln m
+        IO.eprintln s!"allowed: {allowedAxioms}"
+        IO.eprintln s!"elapsed: {← elapsedText started}"
+        return 1
+      catch e =>
+        IO.eprintln s!"axioms: changed-module audit failed: {e}"
+        IO.eprintln s!"elapsed: {← elapsedText started}"
+        return 2
+  | _ =>
+      IO.eprintln "usage: lake exe axioms [--changed-from <revision>]"
+      return 2
