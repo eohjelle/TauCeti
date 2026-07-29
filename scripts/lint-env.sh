@@ -274,14 +274,14 @@ fi
 SCOPE_LEAN="$TMP/scope.lean"
 if [ "$SCOPED" = 1 ]; then
   {
-    echo "  let scoped := true"
+    echo "  let isScoped := true"
     echo "  let selectedModules : Option (Array Name) := some #["
     sed 's/^/    `/; s/$/,/' "$MODULE_IMPORT_LIST"
     echo "  ]"
   } > "$SCOPE_LEAN"
 else
   {
-    echo "  let scoped := false"
+    echo "  let isScoped := false"
     echo "  let selectedModules : Option (Array Name) := none"
   } > "$SCOPE_LEAN"
 fi
@@ -342,7 +342,7 @@ EOF
       | some m => if selectedModule m then acc.push declName else acc
       | none => acc
     | none => acc
-  if scoped then
+  if isScoped then
     for declName in candidates do
       IO.println s!"LINTENV-DECL {declName}"
   let mut scanned := 0
@@ -379,17 +379,15 @@ EOF
           for l in linterNames do
             IO.println s!"NOLINT {l} {decl}"
             nolints := nolints + 1
-  if !scoped && importedNolintEntries == 0 then
+  if !isScoped && importedNolintEntries == 0 then
     throwError "the @[nolint] enumeration is blind: no persistent nolint entries are \
       visible in ANY imported module, yet Batteries/Mathlib are known to carry some — \
       the attribute-extension API moved; fix the enumeration in scripts/lint-env.sh, \
       do not allowlist around this"
-  if scoped then
-    IO.println s!"DOCSCAN-SUMMARY scanned={scanned} documented={documented} \
-      undocumented={undoc} nolints={nolints} decls={candidates.size} $DOCMARKER"
+  if isScoped then
+    IO.println s!"DOCSCAN-SUMMARY scanned={scanned} documented={documented} undocumented={undoc} nolints={nolints} decls={candidates.size} $DOCMARKER"
   else
-    IO.println s!"DOCSCAN-SUMMARY scanned={scanned} documented={documented} \
-      undocumented={undoc} nolints={nolints} $DOCMARKER"
+    IO.println s!"DOCSCAN-SUMMARY scanned={scanned} documented={documented} undocumented={undoc} nolints={nolints} $DOCMARKER"
 EOF
 } > "$DOCDRIVER"
 
