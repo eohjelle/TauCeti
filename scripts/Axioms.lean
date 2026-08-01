@@ -13,10 +13,10 @@ declaration uses only the standard allowlist
 Because it works on the kernel environment rather than on source text, it catches what a
 `grep` cannot: `sorry`/`admit` (which surface as `sorryAx`), `native_decide` (which adds
 `Lean.ofReduceBool`), and any home-rolled `axiom`, including ones reaching in through
-imports. Run via `lake exe axioms` (after `lake build`). For a local authoring
-check, `lake exe axioms --changed-from <revision>` audits only declarations defined
-in added, copied, modified, renamed, or untracked `TauCeti` modules; CI deliberately
-uses the no-argument, repository-wide form.
+imports. Run via `lake exe axioms` (after `lake build`). For a local authoring check,
+`lake exe axioms --changed-since-merge-base <revision>` audits only declarations defined
+in added, copied, modified, renamed, or untracked `TauCeti` modules since the merge base
+of `HEAD` and `<revision>`; CI deliberately uses the no-argument, repository-wide form.
 -/
 
 open Lean
@@ -75,12 +75,16 @@ def gitOutput (args : Array String) : IO String := do
   else
     diagnostic
 
-/-- Existing added, copied, modified, or renamed `TauCeti/**/*.lean` modules relative
-to `base`, plus untracked modules. Deleted modules have no compiled declarations to
-audit. NUL-delimited Git output makes unusual-but-valid path characters unambiguous. -/
-def changedModules (base : String) : IO (Array Name) := do
+/-- Existing added, copied, modified, or renamed `TauCeti/**/*.lean` modules since the
+merge base of `HEAD` and `revision`, plus untracked modules. Deleted modules have no
+compiled declarations to audit. NUL-delimited Git output makes unusual-but-valid path
+characters unambiguous. -/
+def changedModules (revision : String) : IO (Array Name) := do
+  let revisionCommit := (← gitOutput #[
+    "rev-parse", "--verify", revision ++ "^{commit}"
+  ]).trimAscii.copy
   let baseCommit := (← gitOutput #[
-    "rev-parse", "--verify", base ++ "^{commit}"
+    "merge-base", "HEAD", revisionCommit
   ]).trimAscii.copy
   let tracked ← gitOutput #[
     "diff", "--name-only", "-z", "--diff-filter=ACMR", baseCommit, "--", "TauCeti"
@@ -199,13 +203,13 @@ def main (args : List String) : IO UInt32 := do
         for m in messages do IO.eprintln m
         IO.eprintln s!"allowed: {allowedAxioms}"
         return 1
-  | ["--changed-from", base] =>
+  | ["--changed-since-merge-base", revision] =>
       let started ← IO.monoMsNow
       try
-        let modules ← changedModules base
+        let modules ← changedModules revision
         if modules.isEmpty then
-          IO.println s!"axioms: no changed {auditedRoot} modules relative to {base} \
-            (elapsed: {← elapsedText started})."
+          IO.println s!"axioms: no changed {auditedRoot} modules since the merge base with \
+            {revision} (elapsed: {← elapsedText started})."
           return 0
         let (audited, messages) ← withImportedEnv modules (audit (some modules))
         if messages.isEmpty then
@@ -224,5 +228,5 @@ def main (args : List String) : IO UInt32 := do
         IO.eprintln s!"elapsed: {← elapsedText started}"
         return 2
   | _ =>
-      IO.eprintln "usage: lake exe axioms [--changed-from <revision>]"
+      IO.eprintln "usage: lake exe axioms [--changed-since-merge-base <revision>]"
       return 2

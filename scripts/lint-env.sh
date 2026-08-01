@@ -155,7 +155,7 @@
 # it is safe inside the pr-build landrun sandbox. Usage:
 #
 #   scripts/lint-env.sh                              # repository-wide CI check
-#   scripts/lint-env.sh --changed-from <revision>    # changed-module authoring check
+#   scripts/lint-env.sh --changed-since-merge-base <revision>  # changed-module authoring check
 #   scripts/lint-env.sh --update                     # rewrite the global baseline
 #
 # The changed-module form imports only existing added, copied, modified, renamed, or
@@ -169,20 +169,20 @@ ALLOWLIST="scripts/lint-nolints-allowlist.txt"
 START_SECONDS=$SECONDS
 UPDATE=0
 SCOPED=0
-CHANGED_FROM=""
+MERGE_BASE_REVISION=""
 
 usage() {
-  echo "usage: scripts/lint-env.sh [--update | --changed-from <revision>]" >&2
+  echo "usage: scripts/lint-env.sh [--update | --changed-since-merge-base <revision>]" >&2
   exit 2
 }
 
 case "${1:-}" in
   "") [ "$#" -eq 0 ] || usage ;;
   --update) [ "$#" -eq 1 ] || usage; UPDATE=1 ;;
-  --changed-from)
+  --changed-since-merge-base)
     [ "$#" -eq 2 ] || usage
     SCOPED=1
-    CHANGED_FROM=$2
+    MERGE_BASE_REVISION=$2
     ;;
   *) usage ;;
 esac
@@ -242,11 +242,14 @@ LINTERS_LEAN=$(printf '"%s", ' $LINTERS | sed 's/, $//')
 
 MODULE_IMPORT_LIST="$TMP/modules.txt"
 if [ "$SCOPED" = 1 ]; then
-  git rev-parse --verify "${CHANGED_FROM}^{commit}" > "$TMP/base-commit.txt" \
-    || fail "could not resolve changed-module base $CHANGED_FROM"
+  git rev-parse --verify "${MERGE_BASE_REVISION}^{commit}" > "$TMP/revision-commit.txt" \
+    || fail "could not resolve changed-module revision $MERGE_BASE_REVISION"
+  REVISION_COMMIT=$(cat "$TMP/revision-commit.txt")
+  git merge-base HEAD "$REVISION_COMMIT" > "$TMP/base-commit.txt" \
+    || fail "could not find a merge base between HEAD and $MERGE_BASE_REVISION"
   BASE_COMMIT=$(cat "$TMP/base-commit.txt")
   git diff --name-only --diff-filter=ACMR "$BASE_COMMIT" -- TauCeti > "$TMP/tracked-paths.txt" \
-    || fail "could not compare changed modules with $CHANGED_FROM"
+    || fail "could not compare changed modules since the merge base with $MERGE_BASE_REVISION"
   git ls-files --others --exclude-standard -- TauCeti > "$TMP/untracked-paths.txt" \
     || fail "could not enumerate untracked TauCeti modules"
   LC_ALL=C sort -u "$TMP/tracked-paths.txt" "$TMP/untracked-paths.txt" |
@@ -265,8 +268,7 @@ else
 fi
 mods=$(wc -l < "$MODULE_IMPORT_LIST")
 if [ "${mods:-0}" -eq 0 ] && [ "$SCOPED" = 1 ]; then
-  echo "LINT-ENV: PASS — no changed TauCeti modules relative to $CHANGED_FROM \
-(elapsed: $(elapsed_text))."
+  echo "LINT-ENV: PASS — no changed TauCeti modules since the merge base with $MERGE_BASE_REVISION (elapsed: $(elapsed_text))."
   exit 0
 fi
 [ "${mods:-0}" -gt 0 ] || fail "found no TauCeti/*.lean modules — the lint is miswired"
