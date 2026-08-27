@@ -66,6 +66,14 @@ noncomputable def diagonalTorusDefiningIdeal :
   HopfIdeal.kerOfSurjective (diagonalTorusCoordinateMap (R := k) (N := n)).hom
     (diagonalTorusCoordinateMap_surjective k n)
 
+/-- Membership in the diagonal-torus defining ideal is vanishing under coordinate restriction. -/
+@[simp]
+theorem mem_diagonalTorusDefiningIdeal_iff
+    {x : coordinateHopfAlgebra k n} :
+    x ∈ diagonalTorusDefiningIdeal k n ↔
+      (diagonalTorusCoordinateMap (R := k) (N := n)).hom x = 0 := by
+  rw [diagonalTorusDefiningIdeal, HopfIdeal.mem_kerOfSurjective]
+
 /-- The points cut out by `diagonalTorusDefiningIdeal` are exactly the diagonal-torus points. -/
 theorem quotientPointsSubgroup_diagonalTorusDefiningIdeal (A : CommAlgCat.{u} k) :
     CommHopfAlgCat.quotientPointsSubgroup (coordinateHopfAlgebra k n)
