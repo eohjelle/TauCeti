@@ -35,6 +35,8 @@ reducedness nor smoothness is built into the category of commutative Hopf algebr
 * `TauCeti.geometricallyReducedCommHopfAlgProperty_of_smooth`: a smooth commutative Hopf algebra
   over a field is geometrically reduced.
 * `TauCeti.smoothCommHopfAlgProperty_iff_geometricallyReduced`: the finite-type equivalence.
+* `TauCeti.smoothCommHopfAlgProperty.of_baseChange_of_bijective`: smoothness descends across a
+  base change whose algebra map is bijective.
 
 ## References
 
@@ -54,9 +56,48 @@ namespace TauCeti
 
 open AlgebraicGeometry
 
-universe u v
+universe u v w
 
 noncomputable section
+
+namespace smoothCommHopfAlgProperty
+
+/-- Deduce coordinate-algebra smoothness from a scheme-level smoothness argument for the Hopf
+spectrum. The finite-type and group-object instances required by that argument are supplied from
+the commutative Hopf algebra. -/
+theorem of_hopfSpec
+    (k : Type u) [Field k] (H : CommHopfAlgCat.{u} k) [Algebra.FiniteType k H]
+    (hSmooth :
+      let G := (hopfSpec (CommRingCat.of k)).obj (Opposite.op H)
+      ∀ [LocallyOfFiniteType G.X.hom] [GrpObj (Over.mk G.X.hom)], Smooth G.X.hom) :
+    smoothCommHopfAlgProperty k H := by
+  let _ : LocallyOfFiniteType
+      (((hopfSpec (CommRingCat.of k)).obj (Opposite.op H)).X.hom) :=
+    (algebraFiniteType_iff_locallyOfFiniteType_hopfSpec k H).mp inferInstance
+  let _ : GrpObj
+      (Over.mk (((hopfSpec (CommRingCat.of k)).obj (Opposite.op H)).X.hom)) :=
+    inferInstanceAs (GrpObj ((hopfSpec (CommRingCat.of k)).obj (Opposite.op H)).X)
+  apply (algebraSmooth_iff_smooth_hopfSpec k H).mpr
+  rw [smoothAffineGroupSchemeProperty_iff]
+  exact hSmooth
+
+/-- Smoothness descends from scalar extension when the algebra map to the new base is bijective. -/
+theorem of_baseChange_of_bijective
+    {R : Type u} {S : Type w} [CommRing R] [CommRing S] [Algebra R S]
+    (H : CommHopfAlgCat.{v} R) (hMap : Function.Bijective (algebraMap R S))
+    (hSmooth : Algebra.Smooth S (S ⊗[R] H)) :
+    smoothCommHopfAlgProperty R H := by
+  rw [smoothCommHopfAlgProperty_iff]
+  let eS : R ≃ₐ[R] S := AlgEquiv.ofBijective (Algebra.ofId R S) hMap
+  let e : H ≃ₐ[R] (S ⊗[R] H) :=
+    AlgEquiv.ofBijective Algebra.TensorProduct.includeRight
+      (Algebra.TensorProduct.includeRight_bijective hMap)
+  let _ : Algebra.Smooth R S := Algebra.Smooth.of_equiv eS
+  let _ : Algebra.Smooth S (S ⊗[R] H) := hSmooth
+  let _ : Algebra.Smooth R (S ⊗[R] H) := Algebra.Smooth.comp R S _
+  exact Algebra.Smooth.of_equiv e.symm
+
+end smoothCommHopfAlgProperty
 
 /-- **A smooth commutative Hopf algebra over a field is geometrically reduced.**
 
@@ -89,33 +130,19 @@ theorem smoothCommHopfAlgProperty_of_geometricallyReduced
     geometricallyReducedCommHopfAlgProperty.baseChange K hH
   have hSmooth : smoothCommHopfAlgProperty K HK := by
     let _ : Algebra.FiniteType K HK := inferInstance
-    let _ : LocallyOfFiniteType
-        (((hopfSpec (CommRingCat.of K)).obj (Opposite.op HK)).X.hom) :=
-      (algebraFiniteType_iff_locallyOfFiniteType_hopfSpec K HK).mp inferInstance
     let _ : GeometricallyReduced
         (((hopfSpec (CommRingCat.of K)).obj (Opposite.op HK)).X.hom) :=
       (geometricallyReducedCommHopfAlg_iff_geometricallyReduced_hopfSpec K HK).mp hHK
-    -- `smooth_of_grpObj` asks for the `Over.mk X.hom` spelling of the Hopf spectrum object `X`.
-    let _ : GrpObj
-        (Over.mk (((hopfSpec (CommRingCat.of K)).obj (Opposite.op HK)).X.hom)) :=
-      inferInstanceAs (GrpObj ((hopfSpec (CommRingCat.of K)).obj (Opposite.op HK)).X)
-    apply (algebraSmooth_iff_smooth_hopfSpec K HK).mpr
-    rw [smoothAffineGroupSchemeProperty_iff]
+    apply smoothCommHopfAlgProperty.of_hopfSpec K HK
     exact smooth_of_grpObj _
-  rw [smoothCommHopfAlgProperty_iff] at hSmooth ⊢
-  let _ : Algebra.Smooth K (K ⊗[k] H) := hSmooth
   have hMap : Function.Bijective (algebraMap k K) := by
     have heK : (eK : k → K) = algebraMap k K := by
       funext x
       simpa using eK.commutes x
     rw [← heK]
     exact eK.bijective
-  let e : H ≃ₐ[k] (K ⊗[k] H) :=
-    AlgEquiv.ofBijective Algebra.TensorProduct.includeRight
-      (Algebra.TensorProduct.includeRight_bijective hMap)
-  let _ : Algebra.Smooth k K := Algebra.Smooth.of_equiv eK
-  let _ : Algebra.Smooth k (K ⊗[k] H) := Algebra.Smooth.comp k K _
-  exact Algebra.Smooth.of_equiv e.symm
+  exact smoothCommHopfAlgProperty.of_baseChange_of_bijective H hMap
+    ((smoothCommHopfAlgProperty_iff HK).mp hSmooth)
 
 /-- For a finite-type commutative Hopf algebra over a field, smoothness is equivalent to geometric
 reducedness. -/
