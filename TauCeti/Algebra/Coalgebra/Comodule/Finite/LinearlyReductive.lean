@@ -7,7 +7,7 @@ module
 
 public import TauCeti.Algebra.Coalgebra.Comodule.Finite.Abelian
 public import TauCeti.Algebra.Coalgebra.Comodule.LinearlyReductive
-public import Mathlib.Algebra.Homology.ShortComplex.ShortExact
+public import TauCeti.Algebra.Homology.ShortComplex.ShortExact
 
 /-!
 # Linear reductivity and split exact sequences
@@ -18,11 +18,9 @@ exact sequence of finite-dimensional comodules splits. For coordinate Hopf algeb
 identifies the invariant-complement definition of linear reductivity with its categorical
 formulation in the rational representation category.
 
-The proof uses the existing equivariant-projection criterion for complete reducibility and
-Mathlib's construction of a splitting from a retraction in an exact sequence. No Hopf algebra
-structure or finite-dimensionality of the coalgebra is required. The monomorphism criterion
-and the middle-term splitting theorem hold more generally for finite comodules over a flat
-coalgebra over a Noetherian commutative ring.
+No Hopf algebra structure or finite-dimensionality of the coalgebra is required. The monomorphism
+criterion and the middle-term splitting theorem hold more generally for finite comodules over a
+flat coalgebra over a Noetherian commutative ring.
 
 ## References
 
@@ -104,7 +102,7 @@ theorem isCompletelyReducible_iff_forall_isSplitMono (M : FGComoduleCat.{u, v, w
         congrArg Subtype.val h
 
 /-- A short exact sequence with completely reducible middle comodule splits. -/
-theorem nonempty_splitting_of_isCompletelyReducible
+theorem _root_.CategoryTheory.ShortComplex.nonempty_splitting_of_isCompletelyReducible
     (S : ShortComplex (FGComoduleCat.{u, v, w} k C)) (hS : S.ShortExact)
     (hM : Comodule.IsCompletelyReducible k C S.X₂) : Nonempty S.Splitting := by
   obtain ⟨r, hr⟩ :=
@@ -122,14 +120,14 @@ variable {C : Type v} [AddCommMonoid C] [Module k C] [Coalgebra k C]
 
 /-- Linear reductivity is equivalent to splitting every short exact sequence of
 finite-dimensional comodules. It suffices to test comodules in the base field’s universe. -/
-theorem isLinearlyReductive_iff_nonempty_splitting :
+theorem isLinearlyReductive_iff_forall_nonempty_splitting :
     IsLinearlyReductive.{u, v, u} k C ↔
       ∀ S : ShortComplex (FGComoduleCat.{u, v, u} k C),
         S.ShortExact → Nonempty S.Splitting := by
   let : AddCommGroup C := Module.addCommMonoidToAddCommGroup k
   constructor
   · intro h S hS
-    exact FGComoduleCat.nonempty_splitting_of_isCompletelyReducible S hS
+    exact S.nonempty_splitting_of_isCompletelyReducible hS
       (IsLinearlyReductive.isCompletelyReducible k h)
   · intro h
     apply IsLinearlyReductive.of_forall_isCompletelyReducible
@@ -137,9 +135,8 @@ theorem isLinearlyReductive_iff_nonempty_splitting :
     apply (FGComoduleCat.isCompletelyReducible_iff_forall_isSplitMono
       (FGComoduleCat.of (R := k) (C := C) V)).mpr
     intro N f hf
-    obtain ⟨s⟩ := h (ShortComplex.cokernelSequence f)
-      { exact := ShortComplex.cokernelSequence_exact f
-        mono_f := by simpa only [ShortComplex.cokernelSequence] using hf }
+    let : Mono f := hf
+    obtain ⟨s⟩ := h (ShortComplex.cokernelSequence f) (cokernelSequence_shortExact f)
     exact s.isSplitMono_f
 
 end Coalgebra
